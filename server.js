@@ -1,5 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const session = require('express-session');
 const { db, User, Project, Task } = require('./database/setup');
 
 const app = express();
@@ -7,6 +8,15 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
+app.use(session({
+    secret: 'my-secret-key', 
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        secure: false, 
+        maxAge: 24 * 60 * 60 * 1000 
+    }
+}));
 
 // Test database connection
 async function testConnection() {
@@ -68,12 +78,100 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
+// POST /api/login - User login
+app.post('/api/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        // Validate input
+        if (!email || !password) {
+            return res.status(400).json({
+                error: 'Email and password are required'
+            });
+        }
+
+        // Find user by email
+        const user = await User.findOne({
+            where: { email }
+        });
+
+        if (!user) {
+            return res.status(401).json({
+                error: 'Invalid email or password'
+            });
+        }
+
+        // Compare password
+        const isValidPassword = await bcrypt.compare(password, user.password);
+
+        if (!isValidPassword) {
+            return res.status(401).json({
+                error: 'Invalid email or password'
+            });
+        }
+
+        // Create session
+        req.session.userId = user.id;
+        req.session.username = user.username;
+        req.session.email = user.email;
+
+        // Return success
+        res.json({
+            message: 'Login successful',
+            user: {
+                id: user.id,
+                username: user.username,
+                email: user.email
+            }
+        });
+
+    } catch (error) {
+        console.error('Error logging in:', error);
+        res.status(500).json({ error: 'Failed to login' });
+    }
+});
+
+// POST /api/logout - User logout
+app.post('/api/logout', (req, res) => {
+    req.session.destroy((err) => {
+        if (err) {
+            console.error('Error destroying session:', err);
+            return res.status(500).json({
+                error: 'Failed to logout'
+            });
+        }
+
+        res.json({message: 'Logout successful'});
+    });
+});
+
+function requireAuth(req, res, next) {
+    // Check session
+    if (req.session && req.session.userId) {
+
+        // Attach user info
+        req.user = {
+            id: req.session.userId,
+            username: req.session.username,
+            email: req.session.email
+        };
+        next();
+    } else {
+        // Block access
+        res.status(401).json({
+            error: 'Authentication required. Please log in.'
+        });
+    }
+}
+
 // PROJECT ROUTES
 
-// GET /api/projects - Get all projects
-app.get('/api/projects', async (req, res) => {
+// GET /api/projects - Get all projects (protected)
+app.get('/api/projects', requireAuth, async (req, res) => {
     try {
-        const projects = await Project.findAll();
+        const projects = await Project.findAll({
+            where: { userId: req.user.id }
+        });
         res.json(projects);
     } catch (error) {
         console.error('Error fetching projects:', error);
@@ -82,10 +180,15 @@ app.get('/api/projects', async (req, res) => {
 });
 
 // GET /api/projects/:id - Get project by ID
-app.get('/api/projects/:id', async (req, res) => {
+app.get('/api/projects/:id', requireAuth, async (req, res) => {
     try {
-        const project = await Project.findByPk(req.params.id);
-        
+        const project = await Project.findOne({
+            where: {
+                id: req.params.id,
+                userId: req.user.id
+        }
+});
+
         if (!project) {
             return res.status(404).json({ error: 'Project not found' });
         }
@@ -98,7 +201,7 @@ app.get('/api/projects/:id', async (req, res) => {
 });
 
 // POST /api/projects - Create new project
-app.post('/api/projects', async (req, res) => {
+app.post('/api/projects', requireAuth, async (req, res) => {
     try {
         const { name, description, status, dueDate } = req.body;
         
@@ -106,7 +209,8 @@ app.post('/api/projects', async (req, res) => {
             name,
             description,
             status,
-            dueDate
+            dueDate,
+            userId: req.user.id
         });
         
         res.status(201).json(newProject);
@@ -117,13 +221,15 @@ app.post('/api/projects', async (req, res) => {
 });
 
 // PUT /api/projects/:id - Update existing project
-app.put('/api/projects/:id', async (req, res) => {
+app.put('/api/projects/:id', requireAuth, async (req, res) => {
     try {
         const { name, description, status, dueDate } = req.body;
         
         const [updatedRowsCount] = await Project.update(
             { name, description, status, dueDate },
-            { where: { id: req.params.id } }
+            { where: { 
+                id: req.params.id,
+                userId: req.user.id } }
         );
         
         if (updatedRowsCount === 0) {
@@ -139,11 +245,13 @@ app.put('/api/projects/:id', async (req, res) => {
 });
 
 // DELETE /api/projects/:id - Delete project
-app.delete('/api/projects/:id', async (req, res) => {
+app.delete('/api/projects/:id', requireAuth, async (req, res) => {
     try {
         const deletedRowsCount = await Project.destroy({
-            where: { id: req.params.id }
-        });
+            where: { 
+                id: req.params.id,
+                userId: req.user.id } }
+        );
         
         if (deletedRowsCount === 0) {
             return res.status(404).json({ error: 'Project not found' });
